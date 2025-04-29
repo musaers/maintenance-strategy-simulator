@@ -1,179 +1,219 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import random
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox, scrolledtext
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.figure as mpl_fig
+from scipy.optimize import linprog
+import pandas as pd
+import random
+import time
 
 
-class DegradationSimulationGUI:
+class MaintenanceOptimizationGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Degradation Simulation")
-        self.root.geometry("1200x800")
-
-        # Initialize parameters
+        self.root.title("Optimal Maintenance Intervention Simulator")
+        self.root.geometry("1280x800")
+        
+        # Initialize system parameters from the paper
         self.C = tk.IntVar(value=3)  # Number of components
-        self.K = tk.IntVar(value=7)  # Default failure threshold
-        self.P = tk.DoubleVar(value=0.15)  # Default degradation probability
+        self.K = tk.IntVar(value=3)  # Maximum deterioration level
+        self.alpha = tk.DoubleVar(value=0.25)  # Prob. of degradation (1-alpha in paper)
         self.simulation_steps = tk.IntVar(value=100)
-
+        self.yellow_threshold = tk.IntVar(value=5)  # Maximum acceptable yellow states
+        
+        # Cost parameters from the paper
+        self.c1 = tk.DoubleVar(value=100)  # Preventive maintenance cost
+        self.c2 = tk.DoubleVar(value=200)  # Corrective maintenance cost
+        self.ct = tk.DoubleVar(value=30)   # Transfer cost per component
+        self.cr = tk.DoubleVar(value=50)   # Replacement cost per component
+        self.cs = tk.DoubleVar(value=60)   # Shortage cost per component
+        self.ce = tk.DoubleVar(value=30)   # Excess cost per component
+        
         # Component-specific parameters
-        self.component_params = []  # Will hold dictionaries of parameters for each component
-
-        # Cost parameters
-        self.maintenance_cost = tk.DoubleVar(value=1000)
-        self.failure_cost = tk.DoubleVar(value=5000)
-        self.inspection_cost = tk.DoubleVar(value=100)
-
-        # Additional performance metrics
-        self.total_cost = 0
-        self.uptime_percentage = 0
-        self.maintenance_efficiency = 0
-        self.false_alarm_rate = 0
-        self.mean_time_between_failures = 0
-
-        # Create frames
+        self.component_params = []  # Will hold parameters for each component
+        
+        # Results placeholders
+        self.optimal_policy = None
+        self.simulation_results = None
+        self.maintenance_events = []
+        
+        # Create the main interface
+        self.create_notebook()
         self.create_parameter_frame()
         self.create_cost_frame()
-        self.create_button_frame()
-        self.create_result_frame()
-        self.create_performance_frame()
-        self.create_graph_frame()
+        self.create_action_frame()
+        self.create_results_frame()
+        
+        # Initialize component parameters
+        self.update_component_params()
 
-        # Simulation results
-        self.component_states = None
-        self.sensor_signals = None
-        self.system_health = {}
-        self.intervention_count = 0
-        self.failure_count = 0
-        self.false_alarm_count = 0
-        self.downtime_steps = 0
-        self.maintenance_events = []
+    def create_notebook(self):
+        """Create the main tabbed interface"""
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Create main tabs
+        self.setup_tab = ttk.Frame(self.notebook)
+        self.visualization_tab = ttk.Frame(self.notebook)
+        self.policy_tab = ttk.Frame(self.notebook)
+        
+        self.notebook.add(self.setup_tab, text="Setup & Run")
+        self.notebook.add(self.visualization_tab, text="Visualization")
+        self.notebook.add(self.policy_tab, text="Optimal Policy")
+        
+        # Configure the visualization tab with sub-tabs
+        self.viz_notebook = ttk.Notebook(self.visualization_tab)
+        self.viz_notebook.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Create visualization sub-tabs
+        self.time_series_tab = ttk.Frame(self.viz_notebook)
+        self.component_heatmap_tab = ttk.Frame(self.viz_notebook)
+        self.cost_analysis_tab = ttk.Frame(self.viz_notebook)
+        self.signal_history_tab = ttk.Frame(self.viz_notebook)
+        
+        self.viz_notebook.add(self.time_series_tab, text="Component States")
+        self.viz_notebook.add(self.component_heatmap_tab, text="Degradation Heatmap")
+        self.viz_notebook.add(self.cost_analysis_tab, text="Cost Analysis")
+        self.viz_notebook.add(self.signal_history_tab, text="Signal History")
 
     def create_parameter_frame(self):
-        param_frame = ttk.LabelFrame(self.root, text="Simulation Parameters")
+        """Create the system parameters frame"""
+        param_frame = ttk.LabelFrame(self.setup_tab, text="Simulation Parameters")
         param_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nw")
-
-        # C parameter
+        
+        # System parameters
         ttk.Label(param_frame, text="Number of Components (C):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         c_spinbox = ttk.Spinbox(param_frame, from_=1, to=10, textvariable=self.C, width=5)
         c_spinbox.grid(row=0, column=1, padx=5, pady=5)
         c_spinbox.bind("<Return>", self.update_component_params)
         c_spinbox.bind("<<Increment>>", self.update_component_params)
         c_spinbox.bind("<<Decrement>>", self.update_component_params)
-
-        # Default K parameter
-        ttk.Label(param_frame, text="Default Failure Threshold (K):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        ttk.Spinbox(param_frame, from_=1, to=20, textvariable=self.K, width=5).grid(row=1, column=1, padx=5, pady=5)
-
-        # Default P parameter
-        ttk.Label(param_frame, text="Default Degradation Probability (P):").grid(row=2, column=0, padx=5, pady=5,
-                                                                                 sticky="w")
-        ttk.Spinbox(param_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.P, width=5).grid(row=2, column=1,
-                                                                                                        padx=5, pady=5)
-
-        # Simulation steps
-        ttk.Label(param_frame, text="Simulation Steps:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        ttk.Spinbox(param_frame, from_=10, to=1000, increment=10, textvariable=self.simulation_steps, width=5).grid(
+        
+        ttk.Label(param_frame, text="Maximum Deterioration Level (K):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        k_spinbox = ttk.Spinbox(param_frame, from_=2, to=15, textvariable=self.K, width=5)
+        k_spinbox.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(param_frame, text="Degradation Probability (1-α):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        alpha_spinbox = ttk.Spinbox(param_frame, from_=0.05, to=0.95, increment=0.05, textvariable=self.alpha, width=5)
+        alpha_spinbox.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(param_frame, text="Yellow Signal Threshold:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(param_frame, from_=1, to=20, textvariable=self.yellow_threshold, width=5).grid(
             row=3, column=1, padx=5, pady=5)
-
-        # Button to edit component parameters
+        
+        ttk.Label(param_frame, text="Simulation Steps:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(param_frame, from_=50, to=1000, increment=50, textvariable=self.simulation_steps, width=5).grid(
+            row=4, column=1, padx=5, pady=5)
+        
+        # Button to edit component-specific parameters
         ttk.Button(param_frame, text="Edit Component Parameters", command=self.open_component_editor).grid(
-            row=4, column=0, columnspan=2, padx=5, pady=10)
-
-        # Initialize component parameters
-        self.update_component_params()
+            row=5, column=0, columnspan=2, padx=5, pady=10)
 
     def create_cost_frame(self):
-        cost_frame = ttk.LabelFrame(self.root, text="Cost Parameters")
-        cost_frame.grid(row=0, column=0, padx=10, pady=10, sticky="sw")
-        cost_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nw")
-
-        # Maintenance cost
-        ttk.Label(cost_frame, text="Maintenance Cost:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ttk.Spinbox(cost_frame, from_=100, to=10000, increment=100, textvariable=self.maintenance_cost, width=7).grid(
+        """Create the cost parameters frame"""
+        cost_frame = ttk.LabelFrame(self.setup_tab, text="Cost Parameters")
+        cost_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nw")
+        
+        # Fixed costs
+        ttk.Label(cost_frame, text="Preventive Maintenance Cost (c₁):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(cost_frame, from_=50, to=500, increment=10, textvariable=self.c1, width=6).grid(
             row=0, column=1, padx=5, pady=5)
-
-        # Failure cost
-        ttk.Label(cost_frame, text="Failure Cost:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        ttk.Spinbox(cost_frame, from_=500, to=50000, increment=500, textvariable=self.failure_cost, width=7).grid(
+        
+        ttk.Label(cost_frame, text="Corrective Maintenance Cost (c₂):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(cost_frame, from_=100, to=1000, increment=10, textvariable=self.c2, width=6).grid(
             row=1, column=1, padx=5, pady=5)
-
-        # Inspection cost
-        ttk.Label(cost_frame, text="Inspection Cost:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        ttk.Spinbox(cost_frame, from_=10, to=1000, increment=10, textvariable=self.inspection_cost, width=7).grid(
+        
+        # Variable costs
+        ttk.Label(cost_frame, text="Transfer Cost per Component (cₜ):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(cost_frame, from_=10, to=100, increment=5, textvariable=self.ct, width=6).grid(
             row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(cost_frame, text="Replacement Cost per Component (cᵣ):").grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(cost_frame, from_=20, to=200, increment=5, textvariable=self.cr, width=6).grid(
+            row=3, column=1, padx=5, pady=5)
+        
+        ttk.Label(cost_frame, text="Shortage Cost per Component (cₛ):").grid(row=4, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(cost_frame, from_=20, to=200, increment=5, textvariable=self.cs, width=6).grid(
+            row=4, column=1, padx=5, pady=5)
+        
+        ttk.Label(cost_frame, text="Excess Cost per Component (cₑ):").grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        ttk.Spinbox(cost_frame, from_=10, to=100, increment=5, textvariable=self.ce, width=6).grid(
+            row=5, column=1, padx=5, pady=5)
 
-    def create_button_frame(self):
-        button_frame = ttk.Frame(self.root)
-        button_frame.grid(row=2, column=0, padx=10, pady=5, sticky="nw")
+    def create_action_frame(self):
+        """Create the action buttons frame"""
+        action_frame = ttk.Frame(self.setup_tab)
+        action_frame.grid(row=2, column=0, padx=10, pady=10, sticky="nw")
+        
+        ttk.Button(action_frame, text="Calculate Optimal Policy", command=self.calculate_optimal_policy, width=25).grid(
+            row=0, column=0, padx=5, pady=5)
+        
+        ttk.Button(action_frame, text="Run Simulation", command=self.run_simulation, width=25).grid(
+            row=1, column=0, padx=5, pady=5)
+        
+        ttk.Button(action_frame, text="Reset", command=self.reset_simulation, width=25).grid(
+            row=2, column=0, padx=5, pady=5)
 
-        ttk.Button(button_frame, text="Run Simulation", command=self.run_simulation).pack(padx=5, pady=5)
+    def create_results_frame(self):
+        """Create the results display frame"""
+        results_frame = ttk.LabelFrame(self.setup_tab, text="Simulation Results")
+        results_frame.grid(row=0, column=1, rowspan=3, padx=10, pady=10, sticky="nsew")
+        
+        # Status and progress
+        status_frame = ttk.Frame(results_frame)
+        status_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        
+        ttk.Label(status_frame, text="Status:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.status_label = ttk.Label(status_frame, text="Ready", foreground="blue")
+        self.status_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        
+        # Progress bar
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(status_frame, variable=self.progress_var, length=200)
+        self.progress_bar.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+        
+        # Key metrics frame
+        metrics_frame = ttk.LabelFrame(results_frame, text="Key Performance Metrics")
+        metrics_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Metrics labels
+        self.create_metric_label(metrics_frame, "Total Cost:", 0)
+        self.create_metric_label(metrics_frame, "Uptime Percentage:", 1)
+        self.create_metric_label(metrics_frame, "Mean Time Between Failures:", 2)
+        self.create_metric_label(metrics_frame, "Number of Interventions:", 3)
+        self.create_metric_label(metrics_frame, "Preventive Maintenance Count:", 4)
+        self.create_metric_label(metrics_frame, "Corrective Maintenance Count:", 5)
+        self.create_metric_label(metrics_frame, "Yellow Signal Threshold Reached:", 6)
+        
+        # Configure grid expansion
+        self.setup_tab.columnconfigure(1, weight=1)
+        
+        # Results log
+        log_frame = ttk.LabelFrame(results_frame, text="Simulation Log")
+        log_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10)
+        self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-    def create_result_frame(self):
-        result_frame = ttk.LabelFrame(self.root, text="Simulation Results")
-        result_frame.grid(row=3, column=0, padx=10, pady=5, sticky="nw")
-
-        self.result_label = ttk.Label(result_frame, text="No simulation results yet.")
-        self.result_label.pack(padx=5, pady=5)
-
-    def create_performance_frame(self):
-        performance_frame = ttk.LabelFrame(self.root, text="Performance Metrics")
-        performance_frame.grid(row=4, column=0, padx=10, pady=5, sticky="nw")
-
-        # Create labels for each performance metric
-        self.total_cost_label = ttk.Label(performance_frame, text="Total Cost: N/A")
-        self.total_cost_label.pack(anchor="w", padx=5, pady=2)
-
-        self.uptime_label = ttk.Label(performance_frame, text="Uptime Percentage: N/A")
-        self.uptime_label.pack(anchor="w", padx=5, pady=2)
-
-        self.mtbf_label = ttk.Label(performance_frame, text="Mean Time Between Failures: N/A")
-        self.mtbf_label.pack(anchor="w", padx=5, pady=2)
-
-        self.maintenance_efficiency_label = ttk.Label(performance_frame, text="Maintenance Efficiency: N/A")
-        self.maintenance_efficiency_label.pack(anchor="w", padx=5, pady=2)
-
-        self.false_alarm_label = ttk.Label(performance_frame, text="False Alarm Rate: N/A")
-        self.false_alarm_label.pack(anchor="w", padx=5, pady=2)
-
-    def create_graph_frame(self):
-        self.graph_frame = ttk.LabelFrame(self.root, text="Visualization")
-        self.graph_frame.grid(row=0, column=1, rowspan=5, padx=10, pady=10, sticky="nsew")
-
-        # Configure grid to expand graph frame
-        self.root.grid_columnconfigure(1, weight=1)
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_rowconfigure(1, weight=1)
-        self.root.grid_rowconfigure(2, weight=1)
-        self.root.grid_rowconfigure(3, weight=1)
-        self.root.grid_rowconfigure(4, weight=1)
-
-        # Create notebook (tabbed interface) for the visualizations
-        self.notebook = ttk.Notebook(self.graph_frame)
-        self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
-
-        # Create tabs for each visualization
-        self.time_series_tab = ttk.Frame(self.notebook)
-        self.heatmap_tab = ttk.Frame(self.notebook)
-        self.cost_analysis_tab = ttk.Frame(self.notebook)
-
-        self.notebook.add(self.time_series_tab, text="Time Series")
-        self.notebook.add(self.heatmap_tab, text="Component Heatmap")
-        self.notebook.add(self.cost_analysis_tab, text="Cost Analysis")
+    def create_metric_label(self, parent, text, row):
+        """Helper method to create metric labels with consistent formatting"""
+        ttk.Label(parent, text=text).grid(row=row, column=0, padx=5, pady=2, sticky="w")
+        label = ttk.Label(parent, text="N/A")
+        label.grid(row=row, column=1, padx=5, pady=2, sticky="w")
+        setattr(self, f"{text.lower().replace(' ', '_').replace(':', '')}_label", label)
 
     def update_component_params(self, event=None):
         """Update component parameters when number of components changes"""
         num_components = self.C.get()
-
+        
         # Reset the component_params list with the current number of components
         # Preserve existing values if possible
         old_params = self.component_params.copy() if hasattr(self, 'component_params') and self.component_params else []
         self.component_params = []
-
+        
         for i in range(num_components):
             if i < len(old_params):
                 # Keep existing parameters
@@ -181,10 +221,10 @@ class DegradationSimulationGUI:
             else:
                 # Create new parameters with default values
                 self.component_params.append({
-                    'name': f"Component {i + 1}",
-                    'k': self.K.get(),  # Failure threshold
-                    'p': self.P.get(),  # Degradation probability
-                    'cost': 100.0  # Component-specific cost
+                    'name': f"Component {i+1}",
+                    'k': self.K.get(),  # Maximum deterioration level
+                    'p': 1 - self.alpha.get(),  # Degradation probability
+                    'current_state': 0  # Initial state
                 })
 
     def open_component_editor(self):
@@ -192,442 +232,883 @@ class DegradationSimulationGUI:
         editor_window = tk.Toplevel(self.root)
         editor_window.title("Component Parameters Editor")
         editor_window.geometry("600x400")
-
+        editor_window.grab_set()  # Make the window modal
+        
         # Create a frame with scrollbar
         main_frame = ttk.Frame(editor_window)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # Add a canvas
+        
+        # Add a canvas with scrollbar
         canvas = tk.Canvas(main_frame)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
-
+        
         scrollable_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-
+        
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-
+        
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-
+        
         # Headers
-        ttk.Label(scrollable_frame, text="Component Name", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=5,
-                                                                                            pady=5)
-        ttk.Label(scrollable_frame, text="Failure Threshold (K)", font=("Arial", 10, "bold")).grid(row=0, column=1,
-                                                                                                   padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="Degradation Prob (P)", font=("Arial", 10, "bold")).grid(row=0, column=2,
-                                                                                                  padx=5, pady=5)
-        ttk.Label(scrollable_frame, text="Component Cost", font=("Arial", 10, "bold")).grid(row=0, column=3, padx=5,
-                                                                                            pady=5)
-
+        ttk.Label(scrollable_frame, text="Component Name", font=("Arial", 10, "bold")).grid(
+            row=0, column=0, padx=5, pady=5)
+        ttk.Label(scrollable_frame, text="Failure Threshold (K)", font=("Arial", 10, "bold")).grid(
+            row=0, column=1, padx=5, pady=5)
+        ttk.Label(scrollable_frame, text="Degradation Prob (P)", font=("Arial", 10, "bold")).grid(
+            row=0, column=2, padx=5, pady=5)
+        
         # Component parameter fields
         name_vars = []
         k_vars = []
         p_vars = []
-        cost_vars = []
-
+        
         for i, comp in enumerate(self.component_params):
             # Variables to hold values
             name_var = tk.StringVar(value=comp['name'])
             k_var = tk.IntVar(value=comp['k'])
             p_var = tk.DoubleVar(value=comp['p'])
-            cost_var = tk.DoubleVar(value=comp['cost'])
-
+            
             name_vars.append(name_var)
             k_vars.append(k_var)
             p_vars.append(p_var)
-            cost_vars.append(cost_var)
-
+            
             # Create entry fields
-            ttk.Entry(scrollable_frame, textvariable=name_var).grid(row=i + 1, column=0, padx=5, pady=2)
-            ttk.Spinbox(scrollable_frame, from_=1, to=20, textvariable=k_var, width=5).grid(row=i + 1, column=1, padx=5,
-                                                                                            pady=2)
+            ttk.Entry(scrollable_frame, textvariable=name_var).grid(row=i+1, column=0, padx=5, pady=2)
+            ttk.Spinbox(scrollable_frame, from_=1, to=self.K.get(), textvariable=k_var, width=5).grid(
+                row=i+1, column=1, padx=5, pady=2)
             ttk.Spinbox(scrollable_frame, from_=0.01, to=1.0, increment=0.01, textvariable=p_var, width=5).grid(
-                row=i + 1, column=2, padx=5, pady=2)
-            ttk.Spinbox(scrollable_frame, from_=1, to=10000, increment=10, textvariable=cost_var, width=8).grid(
-                row=i + 1, column=3, padx=5, pady=2)
-
+                row=i+1, column=2, padx=5, pady=2)
+        
         # Save button
         def save_parameters():
             for i in range(len(self.component_params)):
                 self.component_params[i]['name'] = name_vars[i].get()
                 self.component_params[i]['k'] = k_vars[i].get()
                 self.component_params[i]['p'] = p_vars[i].get()
-                self.component_params[i]['cost'] = cost_vars[i].get()
             editor_window.destroy()
-
+        
         ttk.Button(editor_window, text="Save Changes", command=save_parameters).pack(pady=10)
 
-    def degrade_components(self, states, P=None):
-        """ Degrade components based on a Bernoulli distribution with component-specific probabilities. """
-        for i in range(len(states)):
-            # Get component-specific failure threshold and degradation probability
-            comp_k = self.component_params[i]['k']
-            comp_p = self.component_params[i]['p'] if P is None else P
+    def log_message(self, message):
+        """Add a message to the log with timestamp"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)  # Scroll to the end
 
-            if states[i] < comp_k:  # Use component-specific threshold
-                if random.random() < comp_p:
-                    states[i] += 1
-        return states
+    def calculate_optimal_policy(self):
+        """Calculate the optimal maintenance intervention policy"""
+        self.status_label.config(text="Calculating optimal policy...", foreground="blue")
+        self.log_message("Starting optimal policy calculation")
+        
+        # Get system parameters
+        C = self.C.get()
+        K = self.K.get()
+        alpha = self.alpha.get()  # Probability of NOT degrading
+        yellow_threshold = self.yellow_threshold.get()
+        
+        # Update progress
+        self.progress_var.set(10)
+        self.root.update()
+        
+        # Since we are using a direct approach based on thresholds rather than calculating
+        # an optimal policy through an MDP or other optimization method,
+        # we'll create a simple policy dictionary
+        policy = {}
+        
+        # Our policy is:
+        # 1. For red signal (2), always intervene immediately with all components
+        # 2. For yellow signal (1), intervene after yellow_threshold consecutive yellows
+        # 3. For green signal (0), never intervene
+        
+        # This approach follows the maintenance rule:
+        # - A red signal (component failure) triggers immediate maintenance
+        # - A yellow threshold being exceeded triggers preventive maintenance
+        
+        self.log_message(f"Creating policy with yellow threshold = {yellow_threshold}")
+        
+        # Create a simplified version of the policy
+        max_steps = 200  # A reasonable upper limit for time steps
+        
+        # Create the policy dictionary
+        for t in range(max_steps):
+            # For red signal, always take all components for maintenance
+            policy[(t, 2)] = C
+            
+            # For yellow signal, the decision depends on the threshold
+            # But for simplicity in our policy representation, we'll use the original
+            # policy mapping model. The actual threshold counting happens in simulation.
+            policy[(t, 1)] = 0  # Default is no intervention
+            
+            # For green signal, never intervene
+            policy[(t, 0)] = 0
+            
+        self.optimal_policy = policy
+        
+        # Update the policy display
+        self.display_maintenance_rules()
+        
+        # Complete the progress bar
+        self.progress_var.set(100)
+        self.status_label.config(text="Maintenance rules set", foreground="green")
+        self.log_message("Maintenance rules have been set based on thresholds")
 
-    def observe_system(self, states):
-        """ Aggregate sensor signal σ based on component-specific thresholds. """
-        # Check if any component has failed based on its specific threshold
-        if any(states[i] >= self.component_params[i]['k'] for i in range(len(states))):
-            return 2  # Red: at least one component has failed
-        elif any(state > 0 for state in states):
-            return 1  # Yellow: at least one component is degraded, but none are failed
+    def display_maintenance_rules(self):
+        """Display the maintenance rules in the policy tab"""
+        # Clear existing content
+        for widget in self.policy_tab.winfo_children():
+            widget.destroy()
+        
+        # Create a frame for the rules display
+        frame = ttk.Frame(self.policy_tab)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Create title
+        ttk.Label(frame, text="Maintenance Rules", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        # Create rules description
+        rules_text = tk.Text(frame, wrap="word", height=15, width=80)
+        rules_text.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        # Insert the rules with formatting
+        rules_content = f"""
+The system follows these maintenance rules:
+
+1. RED SIGNAL (Failure Detection):
+   - If ANY component reaches its maximum deterioration level (K={self.K.get()}), 
+     the system emits a RED signal.
+   - Immediate maintenance is performed, restoring all components to perfect condition.
+   - All components ({self.C.get()} total) are taken for the maintenance operation.
+
+2. YELLOW SIGNAL (Degradation Detection):
+   - If ANY component is degraded but none have failed, the system emits a YELLOW signal.
+   - If the system remains in YELLOW state for {self.yellow_threshold.get()} consecutive time steps,
+     preventive maintenance is performed.
+   - The yellow counter resets after each maintenance operation.
+
+3. GREEN SIGNAL (Perfect Condition):
+   - When ALL components are in perfect condition, the system emits a GREEN signal.
+   - No maintenance action is taken in this state.
+
+Cost Parameters:
+- Preventive Maintenance (Yellow-triggered): {self.c1.get()} units
+- Corrective Maintenance (Red-triggered): {self.c2.get()} units
+- Transfer Cost per Component: {self.ct.get()} units
+- Replacement Cost per Component: {self.cr.get()} units
+- Shortage Cost per Component: {self.cs.get()} units
+- Excess Cost per Component: {self.ce.get()} units
+
+Degradation Model:
+- Each component has a {(1-self.alpha.get())*100:.1f}% chance to degrade by one level each time step.
+- Components degrade independently of each other.
+"""
+        
+        rules_text.insert("1.0", rules_content)
+        rules_text.config(state="disabled")  # Make text read-only
+        
+        # Add a visual representation of the policy
+        canvas_frame = ttk.LabelFrame(frame, text="Policy Visualization")
+        canvas_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        fig = mpl_fig.Figure(figsize=(10, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        
+        # Draw the state machine
+        ax.plot([0, 1], [0, 1], 'go-', markersize=15, label='Green')
+        ax.plot([1, 2], [1, 1], 'yo-', markersize=15, label='Yellow')
+        ax.plot([2, 3], [1, 0], 'ro-', markersize=15, label='Red')
+        ax.plot([3, 0], [0, 0], 'ko--', alpha=0.5)
+        
+        # Add annotations
+        ax.annotate('Start', xy=(0, 0), xytext=(0, -0.2), ha='center')
+        ax.annotate('Degradation', xy=(0.5, 0.5), xytext=(0.5, 0.7), ha='center')
+        ax.annotate(f'Consecutive Yellow\nCount >= {self.yellow_threshold.get()}', xy=(1.5, 1), xytext=(1.5, 1.2), ha='center')
+        ax.annotate('Component\nFailure', xy=(2.5, 0.5), xytext=(2.5, 0.7), ha='center')
+        ax.annotate('Maintenance\n(Reset All Components)', xy=(1.5, 0), xytext=(1.5, -0.2), ha='center')
+        
+        # Set limits and remove axes
+        ax.set_xlim(-0.5, 3.5)
+        ax.set_ylim(-0.5, 1.5)
+        ax.axis('off')
+        
+        # Add legend
+        ax.legend(loc='upper right')
+        
+        # Add title
+        ax.set_title('System State Transitions and Maintenance Policy')
+        
+        # Create canvas
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def determine_truncation_level(self, C, K, alpha, epsilon):
+        """Determine the truncation level U such that P{S^U_Ω} ≤ ε"""
+        # Based on equation (25) from the paper
+        # Simplified approach: We'll use a heuristic based on component degradation
+        
+        max_U = 200  # Maximum reasonable truncation level
+        
+        # Probability of all components staying in perfect condition for n steps
+        # is (alpha)^(C*n) where alpha is the probability of NOT degrading
+        
+        for n in range(1, max_U):
+            # Probability that at least one component has degraded
+            p_degradation = 1 - (alpha ** (C * n))
+            
+            if p_degradation >= 1 - epsilon:
+                return n
+        
+        return max_U
+
+    def get_possible_transitions(self, state, alpha):
+        """Calculate possible transitions from a given state based on degradation model"""
+        C = len(state)
+        transitions = {}
+        
+        # For each component, it can either stay at its current level or degrade one level
+        # Generate all possible combinations of these transitions
+        self.generate_transitions(state, alpha, 0, [], transitions)
+        
+        return transitions
+
+    def generate_transitions(self, state, alpha, index, current_state, transitions):
+        """Recursive helper to generate all possible transitions"""
+        if index == len(state):
+            # We've determined the transition for all components
+            new_state = tuple(current_state)
+            
+            # Calculate probability of this transition
+            prob = 1.0
+            for i, (old, new) in enumerate(zip(state, new_state)):
+                if old == new:
+                    prob *= alpha  # No degradation
+                else:
+                    prob *= (1 - alpha)  # Degradation
+            
+            transitions[new_state] = prob
+            return
+        
+        # Current component stays the same
+        current_state.append(state[index])
+        self.generate_transitions(state, alpha, index+1, current_state, transitions)
+        current_state.pop()
+        
+        # Current component degrades by 1 level if not already at max
+        K = self.K.get()
+        if state[index] < K:
+            current_state.append(state[index] + 1)
+            self.generate_transitions(state, alpha, index+1, current_state, transitions)
+            current_state.pop()
+
+    def determine_signal(self, state, K):
+        """Determine the signal based on component states"""
+        # Green (0): All components are at level 0
+        if all(d == 0 for d in state):
+            return 0
+        
+        # Red (2): At least one component is at level K (failed)
+        if any(d >= K for d in state):
+            return 2
+        
+        # Yellow (1): Some degradation but no failures
+        return 1
+
+    def get_possible_signals(self, n, K):
+        """Determine possible signals at time step n based on equation (9) in the paper"""
+        if n == 0:
+            return [0]  # Only green at initial state
+        elif n < K:
+            return [0, 1]  # Green or yellow for n < K
         else:
-            return 0  # Green: all components are operational
+            return [0, 1, 2]  # Green, yellow, or red for n ≥ K
 
-    def perform_maintenance(self, states):
-        """ Perform maintenance and reset all components to state 0. """
-        states.fill(0)
-        return states
+    def get_possible_actions(self, signal):
+        """Determine possible actions based on signal"""
+        C = self.C.get()
+        
+        if signal == 2:  # Red signal (intervention required)
+            return list(range(1, C+1))  # Actions 1 to C
+        else:  # Green or yellow (intervention optional)
+            return list(range(C+1))  # Actions 0 to C
 
-    def calculate_costs(self, simulation_steps):
-        """Calculate total costs based on maintenance events, failures, and inspections."""
-        # Calculate component-specific costs
-        component_replacement_costs = sum(comp['cost'] for comp in self.component_params) * self.intervention_count
-
-        # Add maintenance labor cost
-        maintenance_labor_cost = self.maintenance_cost.get() * self.intervention_count
-
-        # Total maintenance cost combines parts and labor
-        maintenance_cost = component_replacement_costs + maintenance_labor_cost
-
-        # Other costs
-        failure_cost = self.failure_cost.get() * self.failure_count
-        inspection_cost = self.inspection_cost.get() * simulation_steps  # Inspection done at every step
-
-        return {
-            'maintenance_cost': maintenance_cost,
-            'component_replacement_cost': component_replacement_costs,
-            'maintenance_labor_cost': maintenance_labor_cost,
-            'failure_cost': failure_cost,
-            'inspection_cost': inspection_cost,
-            'total_cost': maintenance_cost + failure_cost + inspection_cost
+    def run_simulation(self):
+        """Run a simulation based on the current parameters and policy"""
+        self.status_label.config(text="Running simulation...", foreground="blue")
+        self.log_message("Starting simulation...")
+        
+        # Get system parameters
+        C = self.C.get()
+        K = self.K.get()
+        alpha = self.alpha.get()  # Probability of NOT degrading
+        simulation_steps = self.simulation_steps.get()
+        yellow_threshold = self.yellow_threshold.get()  # Maximum acceptable yellow states
+        
+        # Make sure component_params is updated
+        self.update_component_params()
+        
+        # Initialize simulation variables
+        component_states = np.zeros((C, simulation_steps + 1), dtype=int)
+        current_states = np.zeros(C, dtype=int)
+        signal_history = np.zeros(simulation_steps + 1, dtype=int)
+        signal_history[0] = 0  # Initial signal is green
+        
+        # Initialize yellow counter for tracking consecutive yellow signals
+        yellow_counter = 0
+        yellow_threshold_reached_count = 0
+        
+        # Reset metrics
+        self.intervention_count = 0
+        self.preventive_maintenance_count = 0
+        self.corrective_maintenance_count = 0
+        self.failure_count = 0
+        self.downtime_steps = 0
+        self.maintenance_events = []
+        
+        # Initialize cost tracking
+        maintenance_costs = np.zeros(simulation_steps + 1)
+        transfer_costs = np.zeros(simulation_steps + 1)
+        shortage_costs = np.zeros(simulation_steps + 1)
+        excess_costs = np.zeros(simulation_steps + 1)
+        component_costs = np.zeros(simulation_steps + 1)
+        cumulative_costs = np.zeros(simulation_steps + 1)
+        
+        # Update progress bar
+        progress_step = 100 / simulation_steps
+        
+        # Main simulation loop
+        for t in range(simulation_steps):
+            self.progress_var.set((t + 1) * progress_step)
+            self.root.update()
+            
+            # Store current component states
+            component_states[:, t] = current_states
+            
+            # Current signal is determined by component states
+            current_signal = self.determine_signal(current_states, K)
+            signal_history[t] = current_signal
+            
+            # Update yellow counter based on current signal
+            if current_signal == 1:  # Yellow signal
+                yellow_counter += 1
+            else:
+                yellow_counter = 0  # Reset counter if not yellow
+            
+            # Determine if maintenance is needed based on:
+            # 1. Red signal (component failure) - immediate maintenance
+            # 2. Yellow counter exceeding threshold
+            maintenance_needed = False
+            maintenance_type = None
+            
+            if current_signal == 2:  # Red signal - immediate maintenance
+                maintenance_needed = True
+                maintenance_type = "corrective"
+            elif yellow_counter >= yellow_threshold:  # Yellow threshold reached
+                maintenance_needed = True
+                maintenance_type = "preventive"
+                yellow_threshold_reached_count += 1
+            
+            # Execute maintenance if needed
+            if maintenance_needed:
+                self.intervention_count += 1
+                self.maintenance_events.append(t)
+                
+                # Count by type
+                if maintenance_type == "corrective":
+                    self.corrective_maintenance_count += 1
+                    maintenance_costs[t] = self.c2.get()  # Corrective maintenance cost
+                else:  # preventive
+                    self.preventive_maintenance_count += 1
+                    maintenance_costs[t] = self.c1.get()  # Preventive maintenance cost
+                
+                # For maintenance we take all components
+                action = C
+                
+                # Transfer cost
+                transfer_costs[t] = action * self.ct.get()
+                
+                # Count actual degraded components
+                degraded_count = np.sum(current_states > 0)
+                
+                # Replacement cost
+                component_costs[t] = degraded_count * self.cr.get()
+                
+                # Shortage or excess cost
+                if action < degraded_count:
+                    shortage_costs[t] = (degraded_count - action) * self.cs.get()
+                else:
+                    excess_costs[t] = (action - degraded_count) * self.ce.get()
+                
+                # Reset all components to perfect condition
+                current_states.fill(0)
+                
+                # Reset yellow counter after maintenance
+                yellow_counter = 0
+                
+                # Log maintenance action
+                self.log_message(f"Time {t}: {maintenance_type.capitalize()} maintenance performed. Reset all components.")
+            else:
+                # No intervention, degrade components according to their probabilities
+                for i in range(C):
+                    # Component-specific degradation rate
+                    comp_alpha = self.component_params[i]['p']  # This is the degradation probability
+                    
+                    # Only degrade if not already at maximum level
+                    if current_states[i] < K and random.random() < comp_alpha:
+                        current_states[i] += 1
+                
+                # Check for failures
+                if np.any(current_states >= K):
+                    self.failure_count += 1
+                    self.downtime_steps += 1
+            
+            # Calculate cumulative costs
+            if t > 0:
+                cumulative_costs[t] = (cumulative_costs[t-1] + maintenance_costs[t] + 
+                                      transfer_costs[t] + component_costs[t] + 
+                                      shortage_costs[t] + excess_costs[t])
+            else:
+                cumulative_costs[t] = (maintenance_costs[t] + transfer_costs[t] + 
+                                      component_costs[t] + shortage_costs[t] + excess_costs[t])
+        
+        # Store final state
+        component_states[:, simulation_steps] = current_states
+        
+        # Store simulation results
+        self.simulation_results = {
+            'component_states': component_states,
+            'signal_history': signal_history,
+            'maintenance_events': self.maintenance_events,
+            'yellow_threshold_reached_count': yellow_threshold_reached_count,
+            'costs': {
+                'maintenance': maintenance_costs,
+                'transfer': transfer_costs,
+                'component': component_costs,
+                'shortage': shortage_costs,
+                'excess': excess_costs,
+                'cumulative': cumulative_costs
+            }
         }
+        
+        # Calculate performance metrics
+        self.calculate_performance_metrics(simulation_steps)
+        
+        # Update status
+        self.status_label.config(text="Simulation complete", foreground="green")
+        self.log_message("Simulation completed successfully")
+        
+        # Generate visualizations
+        self.create_visualizations()
+
+    def determine_signal(self, state, K):
+        """Determine the signal based on component states"""
+        # Green (0): All components are at level 0
+        if all(d == 0 for d in state):
+            return 0
+        
+        # Red (2): At least one component is at level K (failed)
+        if any(d >= K for d in state):
+            return 2
+        
+        # Yellow (1): Some degradation but no failures
+        return 1
 
     def calculate_performance_metrics(self, simulation_steps):
-        """Calculate performance metrics from the simulation."""
-        # Uptime percentage (proportion of time not in failure state)
+        """Calculate performance metrics based on simulation results"""
+        # Extract necessary data
+        maintenance_events = self.maintenance_events
+        costs = self.simulation_results['costs']
+        yellow_threshold_reached_count = self.simulation_results['yellow_threshold_reached_count']
+        
+        # Uptime percentage
         uptime_percentage = ((simulation_steps - self.downtime_steps) / simulation_steps) * 100
-
-        # Mean time between failures
+        
+        # Mean time between failures (MTBF)
         if self.failure_count > 0:
             mtbf = simulation_steps / self.failure_count
         else:
-            mtbf = simulation_steps  # No failures occurred
+            mtbf = simulation_steps  # No failures
+        
+        # Total cost
+        total_cost = costs['cumulative'][-1]
+        
+        # Update GUI with metrics
+        self.total_cost_label.config(text=f"{total_cost:.2f}")
+        self.uptime_percentage_label.config(text=f"{uptime_percentage:.2f}%")
+        self.mean_time_between_failures_label.config(text=f"{mtbf:.2f} steps")
+        self.number_of_interventions_label.config(text=f"{self.intervention_count}")
+        self.preventive_maintenance_count_label.config(text=f"{self.preventive_maintenance_count}")
+        self.corrective_maintenance_count_label.config(text=f"{self.corrective_maintenance_count}")
+        self.yellow_signal_threshold_reached_label.config(text=f"{yellow_threshold_reached_count}")
+        
+        # Log detailed metrics
+        self.log_message(f"Total cost: {total_cost:.2f}")
+        self.log_message(f"Uptime percentage: {uptime_percentage:.2f}%")
+        self.log_message(f"Mean time between failures: {mtbf:.2f} steps")
+        self.log_message(f"Total interventions: {self.intervention_count}")
+        self.log_message(f"Preventive maintenance count: {self.preventive_maintenance_count}")
+        self.log_message(f"Corrective maintenance count: {self.corrective_maintenance_count}")
+        self.log_message(f"Yellow threshold reached count: {yellow_threshold_reached_count}")
+        self.log_message(f"Failure count: {self.failure_count}")
 
-        # Maintenance efficiency (cost per unit of uptime)
-        total_cost = self.calculate_costs(simulation_steps)['total_cost']
-        if uptime_percentage > 0:
-            maintenance_efficiency = total_cost / uptime_percentage
-        else:
-            maintenance_efficiency = float('inf')  # Avoid division by zero
+    def create_visualizations(self):
+        """Create all visualizations based on simulation results"""
+        if not self.simulation_results:
+            messagebox.showwarning("Visualization Error", "No simulation results to visualize")
+            return
+        
+        try:
+            self.create_component_state_visualization()
+            self.create_heatmap_visualization()
+            self.create_cost_analysis_visualization()
+            self.create_signal_history_visualization()
+        except Exception as e:
+            self.log_message(f"Error creating visualizations: {str(e)}")
+            messagebox.showerror("Visualization Error", f"Error creating visualizations: {str(e)}")
 
-        # False alarm rate (interventions that weren't actually needed)
-        if self.intervention_count > 0:
-            false_alarm_rate = self.false_alarm_count / self.intervention_count * 100
-        else:
-            false_alarm_rate = 0
-
-        return {
-            'uptime_percentage': uptime_percentage,
-            'mtbf': mtbf,
-            'maintenance_efficiency': maintenance_efficiency,
-            'false_alarm_rate': false_alarm_rate,
-            'total_cost': total_cost
-        }
-
-    def run_simulation(self):
-        # Clear any existing figures
+    def create_component_state_visualization(self):
+        """Create visualization of signal history only"""
+        # Clear existing content
         for widget in self.time_series_tab.winfo_children():
             widget.destroy()
-        for widget in self.heatmap_tab.winfo_children():
-            widget.destroy()
-        for widget in self.cost_analysis_tab.winfo_children():
-            widget.destroy()
-
-        # Get parameters from the GUI
-        C = self.C.get()
+        
+        # Extract data
+        signal_history = self.simulation_results['signal_history']
+        maintenance_events = self.maintenance_events
         simulation_steps = self.simulation_steps.get()
-
-        # Make sure component_params is updated with the correct number of components
-        self.update_component_params()
-
-        # Initialize component states
-        self.component_states = np.zeros((C, simulation_steps), dtype=int)
-        current_states = np.zeros(C, dtype=int)
-        self.sensor_signals = np.zeros(simulation_steps, dtype=int)
-
-        # Reset system health, intervention count, and performance metrics
-        self.system_health = {}
-        self.intervention_count = 0
-        self.failure_count = 0
-        self.false_alarm_count = 0
-        self.downtime_steps = 0
-        self.maintenance_events = []
-
-        # Initialize cost tracking
-        maintenance_costs = np.zeros(simulation_steps)
-        failure_costs = np.zeros(simulation_steps)
-        inspection_costs = np.zeros(simulation_steps)
-        cumulative_costs = np.zeros(simulation_steps)
-
-        # Main simulation loop
-        for t in range(simulation_steps):
-            # Add inspection cost at every step
-            inspection_costs[t] = self.inspection_cost.get()
-
-            # Degrade components using component-specific parameters
-            current_states = self.degrade_components(current_states)
-            self.component_states[:, t] = current_states.copy()
-
-            # Observe the system health
-            sensor_signal = self.observe_system(current_states)
-            self.sensor_signals[t] = sensor_signal
-
-            # Track system health
-            self.system_health[t] = {
-                'component_states': current_states.copy(),
-                'sensor_signal': sensor_signal
-            }
-
-            # Check for failures (signal == 2)
-            if sensor_signal == 2:
-                self.failure_count += 1
-                failure_costs[t] = self.failure_cost.get()
-                self.downtime_steps += 1
-
-                # Maintenance decision (intervention when at least one component has failed)
-                current_states = self.perform_maintenance(current_states)
-                self.intervention_count += 1
-
-                # Add component-specific costs for maintenance
-                maintenance_costs[t] = self.maintenance_cost.get()
-                for comp in self.component_params:
-                    maintenance_costs[t] += comp['cost']
-
-                self.maintenance_events.append(t)
-
-            # Calculate cumulative costs
-            if t > 0:
-                cumulative_costs[t] = cumulative_costs[t - 1] + maintenance_costs[t] + failure_costs[t] + \
-                                      inspection_costs[t]
-            else:
-                cumulative_costs[t] = maintenance_costs[t] + failure_costs[t] + inspection_costs[t]
-
-        # Calculate performance metrics
-        metrics = self.calculate_performance_metrics(simulation_steps)
-        costs = self.calculate_costs(simulation_steps)
-
-        # Update result label
-        self.result_label.config(
-            text=f"Total number of interventions: {self.intervention_count}, Failures: {self.failure_count}")
-
-        # Update performance metrics labels
-        self.total_cost_label.config(text=f"Total Cost: {costs['total_cost']:.2f}")
-        self.uptime_label.config(text=f"Uptime Percentage: {metrics['uptime_percentage']:.2f}%")
-        self.mtbf_label.config(text=f"Mean Time Between Failures: {metrics['mtbf']:.2f} steps")
-        self.maintenance_efficiency_label.config(
-            text=f"Maintenance Efficiency: {metrics['maintenance_efficiency']:.2f}")
-        self.false_alarm_label.config(text=f"False Alarm Rate: {metrics['false_alarm_rate']:.2f}%")
-
-        # Create and display the visualizations
-        self.plot_system_health_original()
-        self.plot_heatmap_visualization()
-        self.plot_cost_analysis(maintenance_costs, failure_costs, inspection_costs, cumulative_costs)
-
-    def plot_system_health_original(self):
-        """ Plot component states and sensor signals over time. """
-        fig = mpl_fig.Figure(figsize=(10, 8), dpi=100)
-
-        # Plot each component state separately
-        C = self.C.get()
-        simulation_steps = self.simulation_steps.get()
-
-        for i in range(C):
-            ax = fig.add_subplot(C + 1, 1, i + 1)
-            comp_data = [self.system_health[t]['component_states'][i] for t in range(simulation_steps)]
-            ax.plot(range(simulation_steps), comp_data,
-                    label=f'{self.component_params[i]["name"]}')
-
-            # Add component failure threshold as horizontal line
-            comp_k = self.component_params[i]['k']
-            ax.axhline(y=comp_k, color='r', linestyle='--',
-                       label=f'Failure Threshold (K={comp_k})')
-
-            ax.set_ylim(0, max(comp_k + 1, max(comp_data) + 1))  # Ensure Y-axis has room
-            ax.set_xlabel("Time Step")
-            ax.set_ylabel("Degradation Level")
-            ax.legend()
-            ax.grid()
-            ax.set_title(f"{self.component_params[i]['name']} State Over Time (P={self.component_params[i]['p']})")
-
-        # Plot sensor signal as colored rectangular blocks based on state
-        ax = fig.add_subplot(C + 1, 1, C + 1)
-
-        # Color mapping for states
-        colors = {0: 'green', 1: 'gold', 2: 'red'}
-        labels = {0: 'Green (0)', 1: 'Yellow (1)', 2: 'Red (2)'}
-
-        # Plot colored rectangular blocks for each time period
-        for t in range(simulation_steps):
-            state = self.sensor_signals[t]
-            ax.add_patch(plt.Rectangle((t - 0.5, state - 0.4), 1, 0.8,
-                                       color=colors[state], alpha=0.8))
-
-        # Add legend manually
-        from matplotlib.patches import Patch
-        legend_elements = [Patch(facecolor=colors[i], edgecolor='black',
-                                 label=labels[i]) for i in range(3)]
-        ax.legend(handles=legend_elements, loc='best')
-
-        ax.set_xlim(-0.5, simulation_steps - 0.5)
-        ax.set_ylim(-0.5, 2.5)
+        
+        # Create figure
+        fig = mpl_fig.Figure(figsize=(10, 6), dpi=100)
+        
+        # Create a single subplot for signal history
+        ax = fig.add_subplot(111)
+        
+        # Create a legend handler manually
+        legend_elements = []
+        
+        # Plot signal history
+        for signal, color, label in [(0, 'green', 'Green'), (1, 'gold', 'Yellow'), (2, 'red', 'Red')]:
+            mask = signal_history == signal
+            if np.any(mask):
+                points = ax.scatter(np.where(mask)[0], [signal] * np.sum(mask), 
+                                   color=color, label=f"{label} ({signal})")
+                legend_elements.append(points)
+        
+        # Add maintenance event line to legend if there are any events
+        if maintenance_events:
+            line = ax.axvline(x=maintenance_events[0], color='blue', linestyle='-', alpha=0.5, 
+                             label='Maintenance')
+            legend_elements.append(line)
+            
+            # Add the rest of maintenance events without adding to legend
+            for event in maintenance_events[1:]:
+                ax.axvline(x=event, color='blue', linestyle='-', alpha=0.5)
+        
+        # Set limits and labels
         ax.set_yticks([0, 1, 2])
         ax.set_yticklabels(['Green (0)', 'Yellow (1)', 'Red (2)'])
-        ax.set_xlabel("Time Step")
-        ax.set_ylabel("Sensor Signal")
+        ax.set_ylim(-0.5, 2.5)
+        ax.set_xlabel("Time Step", fontsize=12)
+        ax.set_ylabel("Signal", fontsize=12)
+        ax.set_title("System Signal Over Time", fontsize=14)
+        
+        # Add legend manually
+        if legend_elements:
+            ax.legend(handles=legend_elements, loc='upper right')
+        
+        # Add grid for better readability
         ax.grid(True, linestyle='--', alpha=0.7)
-        ax.set_title("System Health (Sensor Signal Over Time)")
-
+        
+        # Add yellow threshold annotation
+        yellow_threshold = self.yellow_threshold.get()
+        ax.text(0.02, 0.02, f"Yellow Threshold: {yellow_threshold}", transform=ax.transAxes,
+               bbox=dict(facecolor='white', alpha=0.7))
+        
+        # Adjust layout
         fig.tight_layout()
-
-        # Add the figure to the tab
+        
+        # Add to canvas
         canvas = FigureCanvasTkAgg(fig, master=self.time_series_tab)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def plot_heatmap_visualization(self):
-        """Create a heatmap visualization of component degradation states over time."""
-        fig = mpl_fig.Figure(figsize=(10, 6), dpi=100)
-        ax = fig.add_subplot(111)
-
+    def create_heatmap_visualization(self):
+        """Create heatmap visualization of component degradation"""
+        # Clear existing content
+        for widget in self.component_heatmap_tab.winfo_children():
+            widget.destroy()
+        
+        # Extract data
+        component_states = self.simulation_results['component_states']
+        maintenance_events = self.maintenance_events
         C = self.C.get()
-
-        # We'll sample time points to avoid overcrowding the heatmap
+        K = self.K.get()
         simulation_steps = self.simulation_steps.get()
-
-        # If we have too many time steps, sample a subset
-        if simulation_steps > 20:
-            # Sample 20 evenly spaced time points
-            time_points = np.linspace(0, simulation_steps - 1, 20, dtype=int)
+        
+        # Create figure
+        fig = mpl_fig.Figure(figsize=(12, 8), dpi=100)
+        ax = fig.add_subplot(111)
+        
+        # If too many time steps, sample at regular intervals
+        if simulation_steps > 50:
+            sample_points = np.linspace(0, simulation_steps, 50, dtype=int)
+            sampled_states = component_states[:, sample_points]
+            time_labels = sample_points
         else:
-            time_points = np.arange(simulation_steps)
-
-        # Create the matrix for the heatmap
-        # Rows are components, columns are time points
-        matrix = np.zeros((C, len(time_points)))
-
-        # Fill the matrix with component states at selected time points
-        for i, t in enumerate(time_points):
-            for j in range(C):
-                matrix[j, i] = self.component_states[j, t]
-
-        # Get component-specific failure thresholds
-        k_values = [self.component_params[i]['k'] for i in range(C)]
-
-        # Calculate the normalized degradation (0-100% of component-specific K)
-        normalized_matrix = np.zeros_like(matrix, dtype=float)
-        for j in range(C):
-            normalized_matrix[j, :] = (matrix[j, :] / k_values[j]) * 100
-
-        # Use a green-yellow-red colormap
-        cmap = plt.cm.get_cmap('RdYlGn_r')  # Red-Yellow-Green reversed
-
-        # Plot the heatmap
-        sns.heatmap(normalized_matrix, cmap=cmap, annot=matrix.astype(int), fmt="d",
-                    cbar_kws={'label': 'Degradation Level (%)'}, ax=ax)
-
-        # Set the labels
-        ax.set_ylabel('Component')
+            sampled_states = component_states
+            time_labels = range(simulation_steps + 1)
+        
+        # Normalize states by component-specific thresholds
+        normalized_states = np.zeros_like(sampled_states, dtype=float)
+        for i in range(C):
+            comp_k = self.component_params[i]['k']
+            normalized_states[i, :] = sampled_states[i, :] / comp_k
+        
+        # Create heatmap
+        im = ax.imshow(normalized_states, aspect='auto', cmap='RdYlGn_r', vmin=0, vmax=1)
+        
+        # Add color bar
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label('Degradation Level (% of threshold)')
+        
+        # Set labels and ticks
         ax.set_xlabel('Time Step')
-
-        # Set y-axis ticks (components)
-        ax.set_yticks(np.arange(C) + 0.5)
+        ax.set_ylabel('Component')
+        ax.set_title('Component Degradation Heatmap')
+        
+        # Set y-ticks (components)
+        ax.set_yticks(range(C))
         ax.set_yticklabels([self.component_params[i]['name'] for i in range(C)])
-
-        # Set x-axis ticks (time points)
-        ax.set_xticks(np.arange(len(time_points)) + 0.5)
-        ax.set_xticklabels([str(t) for t in time_points], rotation=45)
-
-        # Add title
-        ax.set_title('Component Degradation Heatmap Over Time')
-
+        
+        # Set x-ticks (time steps) - show fewer ticks if many steps
+        if len(time_labels) > 20:
+            tick_indices = np.linspace(0, len(time_labels)-1, 20, dtype=int)
+            ax.set_xticks(tick_indices)
+            ax.set_xticklabels([time_labels[i] for i in tick_indices])
+        else:
+            ax.set_xticks(range(len(time_labels)))
+            ax.set_xticklabels(time_labels)
+        
+        # Mark maintenance events
+        for event in maintenance_events:
+            if simulation_steps > 50:
+                # Find nearest sample point
+                event_idx = np.abs(sample_points - event).argmin()
+                ax.axvline(x=event_idx, color='blue', linestyle='--', alpha=0.7)
+            else:
+                ax.axvline(x=event, color='blue', linestyle='--', alpha=0.7)
+        
+        # Add annotation for maintenance events
+        if maintenance_events:
+            ax.text(0.98, 0.02, 'Blue lines: Maintenance events', transform=ax.transAxes, 
+                   color='blue', fontsize=10, ha='right', va='bottom', 
+                   bbox=dict(facecolor='white', alpha=0.7))
+        
         # Adjust layout
         fig.tight_layout()
-
-        # Add the figure to the tab
-        canvas = FigureCanvasTkAgg(fig, master=self.heatmap_tab)
+        
+        # Add to canvas
+        canvas = FigureCanvasTkAgg(fig, master=self.component_heatmap_tab)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Add explanation text
-        explanation = ttk.Label(self.heatmap_tab,
-                                text="Bu heatmap, her komponentin zaman içindeki bozulma durumunu gösterir.\nRenk skalası: Yeşil (sağlıklı) -> Sarı (orta derece bozulma) -> Kırmızı (kritik bozulma)")
-        explanation.pack(pady=5)
-
-    def plot_cost_analysis(self, maintenance_costs, failure_costs, inspection_costs, cumulative_costs):
-        """Create a cost analysis visualization."""
-        fig = mpl_fig.Figure(figsize=(10, 8), dpi=100)
-
-        # First subplot: Individual costs per time step
-        ax1 = fig.add_subplot(211)
+    def create_cost_analysis_visualization(self):
+        """Create cost analysis visualization"""
+        # Clear existing content
+        for widget in self.cost_analysis_tab.winfo_children():
+            widget.destroy()
+        
+        # Extract cost data
+        costs = self.simulation_results['costs']
+        maintenance_events = self.maintenance_events
         simulation_steps = self.simulation_steps.get()
-        time_steps = np.arange(simulation_steps)
-
-        # Plot individual costs
-        ax1.bar(time_steps, maintenance_costs, label='Maintenance Costs')
-        ax1.bar(time_steps, failure_costs, bottom=maintenance_costs, label='Failure Costs')
-        ax1.bar(time_steps, inspection_costs,
-                bottom=maintenance_costs + failure_costs, label='Inspection Costs')
-
+        
+        # Create figure
+        fig = mpl_fig.Figure(figsize=(12, 10), dpi=100)
+        
+        # 1. Stacked bar chart for cost breakdown
+        ax1 = fig.add_subplot(211)
+        
+        # Create time points
+        time_points = np.arange(simulation_steps + 1)
+        
+        # Plot cost components
+        ax1.bar(time_points, costs['maintenance'], label='Fixed Maintenance')
+        ax1.bar(time_points, costs['transfer'], bottom=costs['maintenance'], label='Transfer')
+        ax1.bar(time_points, costs['component'], 
+                bottom=costs['maintenance'] + costs['transfer'], label='Component Replacement')
+        ax1.bar(time_points, costs['shortage'], 
+                bottom=costs['maintenance'] + costs['transfer'] + costs['component'], label='Shortage')
+        ax1.bar(time_points, costs['excess'], 
+                bottom=costs['maintenance'] + costs['transfer'] + costs['component'] + costs['shortage'], 
+                label='Excess')
+        
+        # Mark maintenance events
+        for event in maintenance_events:
+            ax1.axvline(x=event, color='black', linestyle='--', alpha=0.3)
+        
+        # Set labels and title
         ax1.set_xlabel('Time Step')
         ax1.set_ylabel('Cost')
-        ax1.set_title('Cost Breakdown per Time Step')
+        ax1.set_title('Cost Breakdown by Type')
         ax1.legend()
-
-        # Second subplot: Cumulative costs over time
+        
+        # 2. Cumulative cost plot
         ax2 = fig.add_subplot(212)
-        ax2.plot(time_steps, cumulative_costs, 'b-', linewidth=2)
-
-        # Mark maintenance events on the cumulative cost curve
-        for event in self.maintenance_events:
+        
+        # Plot cumulative cost
+        ax2.plot(time_points, costs['cumulative'], 'b-', linewidth=2)
+        
+        # Mark maintenance events
+        for event in maintenance_events:
             ax2.axvline(x=event, color='r', linestyle='--', alpha=0.5)
-
+        
+        # Set labels and title
         ax2.set_xlabel('Time Step')
         ax2.set_ylabel('Cumulative Cost')
-        ax2.set_title('Cumulative Costs Over Time (Red lines indicate maintenance events)')
-
-        # Add cost breakdown in text format
-        costs = self.calculate_costs(simulation_steps)
-        cost_text = (f"Maintenance Costs: {costs['maintenance_cost']:.2f}\n"
-                     f"  - Component Replacement: {costs['component_replacement_cost']:.2f}\n"
-                     f"  - Maintenance Labor: {costs['maintenance_labor_cost']:.2f}\n"
-                     f"Failure Costs: {costs['failure_cost']:.2f}\n"
-                     f"Inspection Costs: {costs['inspection_cost']:.2f}\n"
-                     f"Total Cost: {costs['total_cost']:.2f}")
-
-        ax2.text(0.02, 0.85, cost_text, transform=ax2.transAxes,
-                 bbox=dict(facecolor='white', alpha=0.8), fontsize=10)
-
+        ax2.set_title('Cumulative Cost Over Time')
+        
+        # Add cost summary text
+        total_costs = {
+            'Maintenance': np.sum(costs['maintenance']),
+            'Transfer': np.sum(costs['transfer']),
+            'Component': np.sum(costs['component']),
+            'Shortage': np.sum(costs['shortage']),
+            'Excess': np.sum(costs['excess']),
+            'Total': costs['cumulative'][-1]
+        }
+        
+        summary_text = '\n'.join([f'{k}: {v:.2f}' for k, v in total_costs.items()])
+        
+        ax2.text(0.02, 0.98, summary_text, transform=ax2.transAxes,
+                verticalalignment='top', horizontalalignment='left',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Adjust layout
         fig.tight_layout()
-
-        # Add the figure to the tab
+        
+        # Add to canvas
         canvas = FigureCanvasTkAgg(fig, master=self.cost_analysis_tab)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+    def create_signal_history_visualization(self):
+        """Create signal history visualization with only the pie chart"""
+        # Clear existing content
+        for widget in self.signal_history_tab.winfo_children():
+            widget.destroy()
+        
+        # Extract data
+        signal_history = self.simulation_results['signal_history']
+        
+        # Create figure
+        fig = mpl_fig.Figure(figsize=(10, 8), dpi=100)
+        
+        # Create a single subplot for the pie chart
+        ax = fig.add_subplot(111)
+        
+        # Count occurrences of each signal
+        signal_counts = {
+            'Green (0)': np.sum(signal_history == 0),
+            'Yellow (1)': np.sum(signal_history == 1),
+            'Red (2)': np.sum(signal_history == 2)
+        }
+        
+        # Create labels and percentages
+        labels = list(signal_counts.keys())
+        sizes = list(signal_counts.values())
+        
+        # Calculate percentages
+        total = sum(sizes)
+        percentages = [100 * s / total for s in sizes]
+        
+        # Create customized labels to avoid overlapping
+        # Just use percentages without text labels on the pie
+        # The labels will be in the legend instead
+        autopct_labels = ['%1.1f%%' % p for p in percentages]
+        
+        # Create pie chart
+        colors = ['green', 'gold', 'red']
+        wedges, texts, autotexts = ax.pie(sizes, colors=colors, 
+                                         autopct='%1.1f%%',
+                                         textprops={'fontsize': 12},
+                                         startangle=90)
+        
+        # Customize text appearance to avoid overlapping
+        for text in autotexts:
+            text.set_fontsize(12)
+            text.set_fontweight('bold')
+            
+        # Create a legend outside the pie chart
+        ax.legend(wedges, [f'{l} ({p:.1f}%)' for l, p in zip(labels, percentages)],
+                loc='upper right', bbox_to_anchor=(1.0, 0.9))
+        
+        # Equal aspect ratio ensures that pie is drawn as a circle
+        ax.axis('equal')
+        
+        # Add title
+        ax.set_title('Signal Distribution', fontsize=16, pad=20)
+        
+        # Remove border
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+        
+        # Add extra space around the pie chart
+        fig.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.1)
+        
+        # Add to canvas
+        canvas = FigureCanvasTkAgg(fig, master=self.signal_history_tab)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def reset_simulation(self):
+        """Reset the simulation to initial state"""
+        # Clear results
+        self.simulation_results = None
+        self.optimal_policy = None
+        self.maintenance_events = []
+        
+        # Reset metrics
+        self.total_cost_label.config(text="N/A")
+        self.uptime_percentage_label.config(text="N/A")
+        self.mean_time_between_failures_label.config(text="N/A")
+        self.number_of_interventions_label.config(text="N/A")
+        self.preventive_maintenance_count_label.config(text="N/A")
+        self.corrective_maintenance_count_label.config(text="N/A")
+        self.yellow_signal_threshold_reached_label.config(text="N/A")
+        
+        # Clear log
+        self.log_text.delete(1.0, tk.END)
+        
+        # Reset progress
+        self.progress_var.set(0)
+        
+        # Update status
+        self.status_label.config(text="Ready", foreground="blue")
+        self.log_message("Simulation reset")
+        
+        # Clear visualizations
+        for tab in [self.time_series_tab, self.component_heatmap_tab, 
+                   self.cost_analysis_tab, self.signal_history_tab]:
+            for widget in tab.winfo_children():
+                widget.destroy()
+        
+        # Clear policy tab
+        for widget in self.policy_tab.winfo_children():
+            widget.destroy()
+        
+        ttk.Label(self.policy_tab, text="No optimal policy has been calculated yet.").pack(padx=10, pady=10)
+
 
 def main():
     root = tk.Tk()
-    app = DegradationSimulationGUI(root)
+    app = MaintenanceOptimizationGUI(root)
     root.mainloop()
 
 
